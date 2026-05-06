@@ -23,6 +23,17 @@ import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * 阿里云 DashScope ASR 客户端实现。
+ * <p>
+ * 工作流程：
+ * <ol>
+ *   <li>将本地音频文件上传至 DashScope 文件 API（OSS 预签名 URL）</li>
+ *   <li>提交 fun-asr 异步转录任务</li>
+ *   <li>轮询等待任务完成</li>
+ *   <li>从转录结果 URL 获取文本</li>
+ * </ol>
+ */
 public class AliyunAsrClient implements AsrService {
     private static final Logger log = LoggerFactory.getLogger(AliyunAsrClient.class);
     private static final ObjectMapper mapper = new ObjectMapper();
@@ -42,11 +53,11 @@ public class AliyunAsrClient implements AsrService {
         try {
             log.info("Starting transcription: file={}, requestId={}", audioPath, requestId);
 
-            // Step 1: Upload local file to DashScope to get a file reference
+            // ① 上传本地文件到 DashScope，获取 OSS 预签名 URL
             String fileUrl = uploadFile(audioPath);
-            log.info("File uploaded, url={}", fileUrl);
+            log.info("File uploaded, url obtained");
 
-            // Step 2: Submit transcription task
+            // ② 提交异步转录任务
             TranscriptionParam param = TranscriptionParam.builder()
                     .apiKey(config.apiKey())
                     .model(config.model())
@@ -56,24 +67,25 @@ public class AliyunAsrClient implements AsrService {
 
             Transcription transcription = new Transcription();
             TranscriptionResult asyncResult = transcription.asyncCall(param);
-
             String taskId = asyncResult.getTaskId();
             log.info("Task submitted: taskId={}", taskId);
 
-            // Step 3: Wait for completion
+            // ③ 阻塞等待任务完成（SDK 内部自动轮询）
             TranscriptionQueryParam queryParam = TranscriptionQueryParam
                     .FromTranscriptionParam(param, taskId);
             TranscriptionResult finalResult = transcription.wait(queryParam);
 
             long duration = System.currentTimeMillis() - startTime;
 
+            // 任务失败处理
             if (finalResult.getTaskStatus() != TaskStatus.SUCCEEDED) {
                 log.error("Task failed: taskId={}, status={}", taskId, finalResult.getTaskStatus());
-                return TranscribeResponse.failure("转录任务失败: " + finalResult.getTaskStatus(),
+                return TranscribeResponse.failure(
+                        "转录任务失败: " + finalResult.getTaskStatus(),
                         config.model(), requestId);
             }
 
-            // Step 4: Extract text from results
+            // ④ 从转录结果中提取文本
             String text = extractText(finalResult);
 
             log.info("Transcription completed: file={}, duration={}ms, textLength={}",
@@ -88,16 +100,24 @@ public class AliyunAsrClient implements AsrService {
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - startTime;
             log.error("Transcription failed after {}ms: {}", duration, e.getMessage());
-            return TranscribeResponse.failure("语音识别失败: " + toUserMessage(e), config.model(), requestId);
+            return TranscribeResponse.failure(
+                    "语音识别失败: " + toUserMessage(e), config.model(), requestId);
         }
     }
 
+    // ==================== 文件上传 ====================
+
+    /**
+     * 两阶段获取可用 URL：
+     * ① multipart 上传到 DashScope → 得到 file_id
+     * ② GET 文件列表 → 根据 file_id 找到 OSS 预签名 URL
+     */
     private String uploadFile(String audioPath) throws Exception {
         Path path = Path.of(audioPath);
         String filename = path.getFileName().toString();
         byte[] fileBytes = Files.readAllBytes(path);
 
-        // Step 1: Upload file to DashScope
+        // ① 上传
         String boundary = "----DashScopeUpload" + UUID.randomUUID().toString().replace("-", "");
         byte[] body = buildMultipartBody(boundary, filename, fileBytes);
 
@@ -113,19 +133,20 @@ public class AliyunAsrClient implements AsrService {
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                 .build();
 
-        HttpResponse<String> uploadResponse = httpClient.send(uploadRequest, HttpResponse.BodyHandlers.ofString());
-        if (uploadResponse.statusCode() != 200) {
-            throw new RuntimeException("文件上传失败: HTTP " + uploadResponse.statusCode() + " " + uploadResponse.body());
+        HttpResponse<String> uploadResp = httpClient.send(uploadRequest, HttpResponse.BodyHandlers.ofString());
+        if (uploadResp.statusCode() != 200) {
+            throw new RuntimeException("文件上传失败: HTTP " + uploadResp.statusCode());
         }
 
-        JsonNode uploadJson = mapper.readTree(uploadResponse.body());
+        JsonNode uploadJson = mapper.readTree(uploadResp.body());
         JsonNode uploadedFiles = uploadJson.path("data").path("uploaded_files");
         if (!uploadedFiles.isArray() || uploadedFiles.size() == 0) {
-            throw new RuntimeException("文件上传返回异常: " + uploadResponse.body());
+            throw new RuntimeException("文件上传返回异常: " + uploadResp.body());
         }
         String fileId = uploadedFiles.get(0).path("file_id").asText();
+        log.debug("Uploaded file: name={}, fileId={}", filename, fileId);
 
-        // Step 2: List files to get the presigned OSS URL
+        // ② 查文件列表，获取 OSS 预签名 URL
         HttpRequest listRequest = HttpRequest.newBuilder()
                 .uri(URI.create(FILE_UPLOAD_URL))
                 .header("Authorization", "Bearer " + config.apiKey())
@@ -133,19 +154,19 @@ public class AliyunAsrClient implements AsrService {
                 .GET()
                 .build();
 
-        HttpResponse<String> listResponse = httpClient.send(listRequest, HttpResponse.BodyHandlers.ofString());
-        if (listResponse.statusCode() != 200) {
-            throw new RuntimeException("获取文件列表失败: HTTP " + listResponse.statusCode());
+        HttpResponse<String> listResp = httpClient.send(listRequest, HttpResponse.BodyHandlers.ofString());
+        if (listResp.statusCode() != 200) {
+            throw new RuntimeException("获取文件列表失败: HTTP " + listResp.statusCode());
         }
 
-        JsonNode listJson = mapper.readTree(listResponse.body());
+        JsonNode listJson = mapper.readTree(listResp.body());
         JsonNode files = listJson.path("data").path("files");
         if (files.isArray()) {
             for (JsonNode f : files) {
                 if (fileId.equals(f.path("file_id").asText(""))) {
                     String url = f.path("url").asText();
                     if (url != null && !url.isBlank()) {
-                        log.info("Got file URL for file_id={}", fileId);
+                        log.info("Got presigned OSS URL for file_id={}", fileId);
                         return url;
                     }
                 }
@@ -155,6 +176,7 @@ public class AliyunAsrClient implements AsrService {
         throw new RuntimeException("无法获取上传文件的访问URL");
     }
 
+    /** 构建 RFC 7578 multipart/form-data 请求体 */
     private byte[] buildMultipartBody(String boundary, String filename, byte[] fileBytes) {
         try {
             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
@@ -167,10 +189,13 @@ public class AliyunAsrClient implements AsrService {
             bos.write(footer.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             return bos.toByteArray();
         } catch (Exception e) {
-            throw new RuntimeException("构建multipart请求失败", e);
+            throw new RuntimeException("构建 multipart 请求失败", e);
         }
     }
 
+    // ==================== 结果提取 ====================
+
+    /** 从转录任务结果中提取文本——先取 transcriptionUrl，再 HTTP GET 获取实际内容 */
     private String extractText(TranscriptionResult result) {
         List<TranscriptionTaskResult> taskResults = result.getResults();
         if (taskResults == null || taskResults.isEmpty()) return null;
@@ -189,6 +214,10 @@ public class AliyunAsrClient implements AsrService {
         return !sb.isEmpty() ? sb.toString() : null;
     }
 
+    /**
+     * 从转录结果 URL 获取文本内容。
+     * 返回的 JSON 可能包含 transcripts 数组、text 字段或原始文本。
+     */
     private String fetchTranscriptionText(String url) {
         try {
             HttpClient httpClient = HttpClient.newHttpClient();
@@ -204,8 +233,8 @@ public class AliyunAsrClient implements AsrService {
             if (response.statusCode() == 200) {
                 String body = response.body();
                 try {
+                    // 尝试从 JSON 结构中提取 transcripts[].text
                     JsonNode root = mapper.readTree(body);
-                    // Try to extract transcripts
                     if (root.has("transcripts") && root.get("transcripts").isArray()) {
                         StringBuilder sb = new StringBuilder();
                         for (JsonNode t : root.get("transcripts")) {
@@ -222,6 +251,7 @@ public class AliyunAsrClient implements AsrService {
                     }
                     return body;
                 } catch (Exception e) {
+                    // 不是 JSON，直接返回原始文本
                     return body;
                 }
             }
@@ -233,10 +263,14 @@ public class AliyunAsrClient implements AsrService {
         }
     }
 
+    // ==================== 错误处理 ====================
+
+    /** 将原始异常转换为用户可读的中文错误提示 */
     private String toUserMessage(Throwable e) {
         String msg = e.getMessage();
         if (msg == null) return "未知错误，请查看日志";
         String lower = msg.toLowerCase();
+
         if (lower.contains("apikey") || lower.contains("鉴权") || lower.contains("unauthorized")) {
             return "API 鉴权失败，请检查 ALIBABA_CLOUD_API_KEY";
         }
@@ -247,7 +281,7 @@ public class AliyunAsrClient implements AsrService {
             return "模型不存在或未开通: " + config.model();
         }
         if (lower.contains("unsupported") || lower.contains("format")) {
-            return "音频格式不支持，仅支持 .m4a 文件";
+            return "音频格式不支持，请检查文件是否为有效的音频文件";
         }
         if (lower.contains("accessdenied")) {
             return "API 权限不足，请检查 API Key 是否开通语音识别服务";
