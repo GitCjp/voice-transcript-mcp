@@ -1,8 +1,10 @@
 # voice-transcript-mcp
 
-MCP stdio 服务，将本地 `m4a` 音频文件转写为文本。
+MCP stdio 服务，将本地音频文件转写为文本。
 
 基于 Java 21，调用阿里云 DashScope `fun-asr` 模型，自动完成文件上传 → 语音识别 → 返回文本。
+
+支持格式：**m4a / mp3 / wav / flac / ogg / aac / wma / opus / amr / caf / aiff / ape / webm / m4b / mp4**
 
 ## 环境要求
 
@@ -15,7 +17,7 @@ MCP stdio 服务，将本地 `m4a` 音频文件转写为文本。
 ### 1. 编译
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/voice-transcript-mcp.git
+git clone https://github.com/GitCjp/voice-transcript-mcp.git
 cd voice-transcript-mcp
 mvn clean package
 ```
@@ -24,7 +26,7 @@ mvn clean package
 
 #### Claude Code
 
-项目目录下创建 `.mcp.json`（或编辑已有的）：
+项目目录下创建 `.mcp.json`（参考 `.mcp.json.example`）：
 
 ```json
 {
@@ -68,13 +70,13 @@ ALIBABA_CLOUD_API_KEY = "你的DashScope API Key"
 
 重启 Codex，在对话中明确指定工具：
 
-> 使用 voice-transcript 的 transcribe_audio 工具，转写 /Users/xxx/录音.m4a
+> 使用 voice-transcript 的 transcribe_audio 工具，转写 /Users/xxx/录音.mp3
 
 ### 3. 效果
 
 ```
 用户: 帮我把 /Users/me/Downloads/面试录音.m4a 转成文字
-→ 上传文件（约 10MB/s）
+→ 上传文件
 → fun-asr 模型转录（约 30 秒）
 → 返回完整文本
 ```
@@ -84,6 +86,8 @@ ALIBABA_CLOUD_API_KEY = "你的DashScope API Key"
 | 变量名 | 必填 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `ALIBABA_CLOUD_API_KEY` | 是 | - | DashScope API Key |
+| `ALIBABA_CLOUD_ASR_MODEL` | 否 | `fun-asr` | ASR 模型名 |
+| `ALIBABA_CLOUD_ASR_ENDPOINT` | 否 | `https://dashscope.aliyuncs.com/api/v1` | API 端点 |
 
 ## 工具说明
 
@@ -93,7 +97,7 @@ ALIBABA_CLOUD_API_KEY = "你的DashScope API Key"
 
 ```json
 {
-  "audio_path": "/absolute/path/to/recording.m4a"
+  "audio_path": "/absolute/path/to/recording.mp3"
 }
 ```
 
@@ -121,9 +125,9 @@ ALIBABA_CLOUD_API_KEY = "你的DashScope API Key"
 
 ## 工作流程
 
-1. 校验本地 m4a 文件
-2. 上传到 DashScope 文件 API（内部存储）
-3. 提交 `fun-asr` 转录任务
+1. 校验本地音频文件
+2. 上传到 DashScope 文件 API
+3. 提交 `fun-asr` 异步转录任务
 4. 轮询等待任务完成
 5. 获取转录文本并返回
 
@@ -138,7 +142,7 @@ src/main/java/com/voicetranscript/mcp/
 │   ├── McpServerBootstrap.java  # MCP stdio JSON-RPC 服务
 │   └── TranscribeAudioTool.java # 工具定义与调用
 ├── asr/
-│   ├── AsrService.java          # 接口
+│   ├── AsrService.java          # ASR 服务接口
 │   └── AliyunAsrClient.java     # DashScope SDK 实现
 ├── dto/
 │   ├── TranscribeRequest.java
@@ -151,5 +155,6 @@ src/main/java/com/voicetranscript/mcp/
 
 - 日志输出到 stderr，不干扰 stdout 上的 MCP 通信
 - API Key 仅通过环境变量注入，不写入日志
-- 支持 m4a 格式，对音频时长无硬限制（10 分钟约 30 秒完成）
+- 支持 m4a / mp3 / wav / flac / ogg / aac 等 15 种音频格式
+- 对音频时长无硬限制（10 分钟约 30 秒完成）
 - 不需要手动启动 jar 进程，MCP Host 自动管理生命周期
