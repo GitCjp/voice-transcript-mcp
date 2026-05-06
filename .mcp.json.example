@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "voice-transcript": {
+      "command": "java",
+      "args": [
+        "-jar",
+        "/absolute/path/voice-transcript-mcp/target/voice-transcript-mcp-1.0.0.jar"
+      ],
+      "env": {
+        "ALIBABA_CLOUD_API_KEY": "你的DashScope API Key"
+      }
+    }
+  }
+}

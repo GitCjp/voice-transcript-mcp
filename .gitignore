@@ -1,0 +1,11 @@
+target/
+*.jar
+*.class
+.idea/
+*.iml
+.vscode/
+*.log
+.env
+.DS_Store
+.mcp.json
+dependency-reduced-pom.xml
